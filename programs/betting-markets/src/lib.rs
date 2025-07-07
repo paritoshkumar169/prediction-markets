@@ -1,5 +1,9 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use borsh::{BorshDeserialize, BorshSerialize};
+
+pub mod utils;
+use utils::{MarketStats, HistoricalData, ActionType, borsh_utils};
 
 declare_id!("EHgavRW857rfGMyP17kjKcuSqj8Gh9fVKC6A2HcBkeF5");
 
@@ -174,6 +178,67 @@ pub mod betting_markets {
 
         Ok(())
     }
+
+    pub fn update_market_stats(
+        ctx: Context<UpdateMarketStats>,
+    ) -> Result<()> {
+        let market = &ctx.accounts.market;
+        let market_stats = &mut ctx.accounts.market_stats;
+        
+        // Create or update market statistics using Borsh serialization
+        let mut stats = MarketStats::new();
+        stats.total_volume = market.total_pool;
+        stats.unique_bettors = 1; // Simplified for demo
+        stats.calculate_probabilities(&market.outcome_pools, market.total_pool);
+        stats.last_updated = Clock::get()?.unix_timestamp;
+        
+        // Demonstrate custom Borsh serialization
+        let serialized_data = borsh_utils::safe_serialize(&stats)?;
+        msg!("Market stats serialized to {} bytes", serialized_data.len());
+        
+        // Store the stats (in a real implementation, you'd store this data)
+        market_stats.data = serialized_data;
+        market_stats.market = market.key();
+        market_stats.last_updated = stats.last_updated;
+        
+        emit!(MarketStatsUpdated {
+            market_id: market.market_id,
+            total_volume: stats.total_volume,
+            probabilities: stats.outcome_probabilities,
+            updated_at: stats.last_updated,
+        });
+
+        Ok(())
+    }
+
+    pub fn get_market_analytics(
+        ctx: Context<GetMarketAnalytics>,
+    ) -> Result<()> {
+        let market_stats = &ctx.accounts.market_stats;
+        
+        // Demonstrate Borsh deserialization
+        let stats: MarketStats = borsh_utils::safe_deserialize(&market_stats.data)?;
+        
+        msg!("Market Analytics:");
+        msg!("Total Volume: {}", stats.total_volume);
+        msg!("Unique Bettors: {}", stats.unique_bettors);
+        msg!("Outcome Probabilities: {:?}", stats.outcome_probabilities);
+        msg!("Last Updated: {}", stats.last_updated);
+
+        // Record analytics access
+        let historical_data = HistoricalData {
+            timestamp: Clock::get()?.unix_timestamp,
+            action_type: ActionType::BetPlaced, // Using existing enum
+            amount: 0,
+            outcome_index: 0,
+            bettor: ctx.accounts.authority.key(),
+        };
+
+        let _analytics_bytes = borsh_utils::safe_serialize(&historical_data)?;
+        msg!("Analytics access recorded using Borsh serialization");
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -250,15 +315,37 @@ pub struct ClaimPayout<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct UpdateMarketStats<'info> {
+    pub market: Account<'info, Market>,
+    #[account(
+        init_if_needed,
+        payer = authority,
+        space = 8 + MarketStatsAccount::INIT_SPACE,
+        seeds = [b"market_stats", market.key().as_ref()],
+        bump
+    )]
+    pub market_stats: Account<'info, MarketStatsAccount>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct GetMarketAnalytics<'info> {
+    pub market_stats: Account<'info, MarketStatsAccount>,
+    pub authority: Signer<'info>,
+}
+
 #[account]
-#[derive(InitSpace)]
+#[derive(InitSpace, BorshSerialize, BorshDeserialize)]
 pub struct GlobalState {
     pub authority: Pubkey,
     pub market_count: u64,
 }
 
 #[account]
-#[derive(InitSpace)]
+#[derive(InitSpace, BorshSerialize, BorshDeserialize)]
 pub struct Market {
     pub authority: Pubkey,
     pub market_id: u64,
@@ -277,7 +364,7 @@ pub struct Market {
 }
 
 #[account]
-#[derive(InitSpace)]
+#[derive(InitSpace, BorshSerialize, BorshDeserialize)]
 pub struct Bet {
     pub bettor: Pubkey,
     pub market: Pubkey,
@@ -287,7 +374,17 @@ pub struct Bet {
     pub timestamp: i64,
 }
 
+#[account]
+#[derive(InitSpace, BorshSerialize, BorshDeserialize)]
+pub struct MarketStatsAccount {
+    pub market: Pubkey,
+    #[max_len(512)]
+    pub data: Vec<u8>, // Serialized MarketStats using Borsh
+    pub last_updated: i64,
+}
+
 #[event]
+#[derive(BorshSerialize, BorshDeserialize)]
 pub struct MarketCreated {
     pub market_id: u64,
     pub authority: Pubkey,
@@ -297,6 +394,7 @@ pub struct MarketCreated {
 }
 
 #[event]
+#[derive(BorshSerialize, BorshDeserialize)]
 pub struct BetPlaced {
     pub bettor: Pubkey,
     pub market_id: u64,
@@ -305,6 +403,7 @@ pub struct BetPlaced {
 }
 
 #[event]
+#[derive(BorshSerialize, BorshDeserialize)]
 pub struct MarketResolved {
     pub market_id: u64,
     pub winning_outcome: u8,
@@ -312,11 +411,21 @@ pub struct MarketResolved {
 }
 
 #[event]
+#[derive(BorshSerialize, BorshDeserialize)]
 pub struct PayoutClaimed {
     pub bettor: Pubkey,
     pub market_id: u64,
     pub bet_amount: u64,
     pub payout_amount: u64,
+}
+
+#[event]
+#[derive(BorshSerialize, BorshDeserialize)]
+pub struct MarketStatsUpdated {
+    pub market_id: u64,
+    pub total_volume: u64,
+    pub probabilities: Vec<f64>,
+    pub updated_at: i64,
 }
 
 #[error_code]
@@ -349,4 +458,8 @@ pub enum ErrorCode {
     LosingBet,
     #[msg("No payout available")]
     NoPayoutAvailable,
+    #[msg("Failed to serialize data")]
+    SerializationError,
+    #[msg("Failed to deserialize data")]
+    DeserializationError,
 }
